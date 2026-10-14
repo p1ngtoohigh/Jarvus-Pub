@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """HYDRA public paid-work monitor; reports candidate links, never applies or pays."""
 import datetime as dt
+import html
+import xml.etree.ElementTree as ET
 import json
 import os
 import re
@@ -51,9 +53,69 @@ def search():
             print("Search failed:", query, str(exc), file=sys.stderr)
     return list(found.values())
 
+
+KEYWORDS = re.compile(r"shopify|e.?commerce|product list|catalog|data entry|python|automation|web develop|website|content writ|technical writ|virtual assistant|quality assurance|\\bqa\\b|freelance|contract|research|spreadsheet", re.I)
+
+def public_get(url, accept="application/json"):
+    req = urllib.request.Request(url, headers={"User-Agent": "hydra-work-watch/1.1", "Accept": accept})
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        raw = resp.read(1_500_000)
+    return json.loads(raw) if accept == "application/json" else raw
+
+def qualify(title, url, source, description="", updated=""):
+    title = html.unescape(re.sub(r"<[^>]+>", " ", str(title or ""))).strip()[:150]
+    parsed = urllib.parse.urlparse(str(url or ""))
+    if parsed.scheme != "https" or not parsed.hostname or not title:
+        return None
+    description = html.unescape(re.sub(r"<[^>]+>", " ", str(description or "")))
+    if not KEYWORDS.search(title + " " + description[:1200]):
+        return None
+    return {"title": title, "url": url, "source": source, "updated": str(updated or "")[:40]}
+
+def remotive():
+    jobs = public_get("https://remotive.com/api/remote-jobs?limit=100").get("jobs", [])
+    return [item for job in jobs if (item := qualify(job.get("title"), job.get("url"), "Remotive", str(job.get("category", "")) + " " + str(job.get("description", "")), job.get("publication_date")))]
+
+def rss(url, source):
+    root = ET.fromstring(public_get(url, "application/rss+xml"))
+    entries = root.findall(".//item") + root.findall(".//{http://www.w3.org/2005/Atom}entry")
+    results = []
+    for entry in entries:
+        def field(*names):
+            for name in names:
+                node = entry.find(name)
+                if node is not None:
+                    return node.get("href") or node.text or ""
+            return ""
+        item = qualify(field("title", "{http://www.w3.org/2005/Atom}title"), field("link", "{http://www.w3.org/2005/Atom}link"), source, field("description", "{http://www.w3.org/2005/Atom}summary"), field("pubDate", "{http://www.w3.org/2005/Atom}updated"))
+        if item:
+            results.append(item)
+    return results
+
+def gather():
+    sources = [
+        ("GitHub", search),
+        ("Remotive", remotive),
+        ("We Work Remotely", lambda: rss("https://weworkremotely.com/remote-jobs.rss", "We Work Remotely")),
+        ("Remote OK", lambda: rss("https://remoteok.com/remote-jobs.rss", "Remote OK"))
+    ]
+    for url in os.getenv("HYDRA_APPROVED_RSS_FEEDS", "").split(","):
+        if url.strip().startswith("https://"):
+            sources.append(("Approved RSS", lambda u=url.strip(): rss(u, "Approved RSS")))
+    leads, health = {}, {}
+    for name, fn in sources:
+        try:
+            items = fn()
+            health[name] = {"status": "ok", "matches": len(items)}
+            for item in items:
+                leads[item["url"]] = item
+        except (urllib.error.URLError, TimeoutError, ValueError, ET.ParseError) as exc:
+            health[name] = {"status": "error", "detail": str(exc)[:140]}
+    return list(leads.values()), health
+
 def main():
-    leads = search()
-    print(json.dumps({"candidate_count": len(leads), "candidates": leads[:20]}, indent=2))
+    leads, health = gather()
+    print(json.dumps({"source_health": health, "candidate_count": len(leads), "candidates": leads[:10]}, indent=2))
     if not (REPO and TOKEN):
         print("Read-only mode: no repository token.")
         return
@@ -65,11 +127,11 @@ def main():
     if not fresh:
         print("No new candidates.")
         return
-    lines = [f'- [{x["title"]}]({x["url"]}) — updated {x["updated"]}' for x in fresh]
-    note = "\n\n**Unverified leads, not contracts.** Confirm funding, eligibility, and AI-use rules. No proposal was submitted."
+    lines = [f'- **{x.get("source", "GitHub")}:** [{re.sub(r"[][\\\\]", " ", x["title"])}]({x["url"]})' for x in fresh]
+    note = "\n\n**Unverified leads, not contracts.** Confirm listing, payment, eligibility, and AI-use rules. No proposal was submitted."
     markers = "\n".join(f'<!-- seen:{x["url"]} -->' for x in fresh)
     if issue:
-        request(issue["url"], "PATCH", {"body": (issue.get("body") or "") + "\n" + markers})
+        request(issue["url"], "PATCH", {"body": ((issue.get("body") or "") + "\n" + markers)[-55000:]})
         request(issue["comments_url"], "POST", {"body": "New paid-work candidates:\n\n" + "\n".join(lines) + note})
         print("Updated", issue["html_url"])
     else:
