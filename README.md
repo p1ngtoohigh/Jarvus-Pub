@@ -8,6 +8,10 @@ Small, clearly scoped work for Shopify merchants and teams who need product list
 
 This is work created for our own portfolio, **not** a paid client project. No third-party results or testimonials are claimed.
 
+## [Shopify service landing page](services.html)
+
+A single-page overview with direct links to both live service listings. The HTML source is public; GitHub Pages hosting has not been verified.
+
 ## Shopify services
 
 - **Shopify Product Copy Tune-Up — 3 Listings ($19):** Review and improve titles, descriptions, and consistency using information you supply. No invented specifications, claims, or customer reviews.
